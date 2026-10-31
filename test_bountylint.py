@@ -203,6 +203,42 @@ class ScoringTests(unittest.TestCase):
         result = bountylint.score_issue(signals)
         self.assertEqual(result["verdict"], "CAUTION")
 
+    def test_contested_bounty_is_not_pursued(self):
+        """A rich, escrowed bounty with 13 open PRs is busy work, not an opportunity."""
+        signals = {
+            "amount_usd": 2340,
+            "token_reward": False,
+            "escrow": "algora-pbc",
+            "is_open": True,
+            "repo_adjustments": bountylint.repo_health(
+                {"stargazers_count": 15137, "forks_count": 3312, "license": {"spdx_id": "Apache-2.0"},
+                 "open_issues_count": 1475},
+                4000,
+            ),
+            "comment_count": 212,
+            "open_prs": 13,
+            "claimants": 4,
+            "updated_days": 0,
+            "ai_policy": "unknown",
+        }
+        result = bountylint.score_issue(signals)
+        self.assertNotEqual(result["verdict"], "PURSUE")
+        self.assertLess(result["score"], 65)
+
+    def test_open_prs_penalty_is_capped(self):
+        reasons = bountylint.score_issue(
+            {
+                "amount_usd": 100,
+                "repo_adjustments": [],
+                "comment_count": 0,
+                "open_prs": 40,
+                "claimants": 0,
+                "updated_days": 1,
+            }
+        )["reasons"]
+        pr_reason = next(r for r in reasons if "open PR" in r["reason"])
+        self.assertEqual(pr_reason["delta"], -24)
+
 
 class FakeGitHub:
     """Stands in for the network so analyse() is covered offline."""
