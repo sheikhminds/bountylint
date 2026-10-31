@@ -55,20 +55,32 @@ change. `--json` for scripting.
 
 ## Definition of Done for v0.1.0
 
-- [ ] CLI runs end to end against live GitHub data (output pasted in LOG.md)
-- [ ] `python3 test_bountylint.py` passes (pure-function tests, no network)
-- [ ] No TODOs, placeholders, or stub functions
-- [ ] README: install, usage, example, how scoring works, limits
-- [ ] MIT license + real tip address
-- [ ] Public repo, CI green, tagged `v0.1.0` release with notes
-- [ ] Logged with proof in LOG.md
+- [x] CLI runs end to end against live GitHub data (output pasted in LOG.md)
+- [x] `python3 test_bountylint.py` passes (36 offline tests, no network)
+- [x] No TODOs, placeholders, or stub functions
+- [x] README: install, usage, example, how scoring works, limits
+- [x] MIT license + real tip address
+- [x] Public repo, CI green, tagged releases `v0.1.0` and `v0.1.1` with notes
+- [x] Logged with proof in LOG.md
 
 ## Kill condition
 
 If after 7 days (2026-11-07) the repo has 0 stars, 0 tips, and has not helped land a bounty, kill it,
 delete the shipped claim from the log, and pivot to bounty-only work.
 
-## Session handoff (filled at end of each cycle)
+## Session handoff (2026-10-31, cycle 1)
 
-- Done: see LOG.md entry for the cycle.
-- Next: see LOG.md "Next Action".
+Done:
+
+- Shipped v0.1.0 (PR #1) and v0.1.1 (PR #2, competition weighting fix) to
+  https://github.com/sheikhminds/bountylint. CI green on 3.10/3.12/3.13 + gitleaks, main protected.
+- 36 offline tests pass; live runs against microg/GmsCore#2843 and a search scan are pasted in
+  LOG.md.
+- Recon scored 10 opportunities; bounty-scraper killed and its false shipped claim retracted.
+
+Next:
+
+- Use the tool to qualify 5 fresh bounties per cycle, then claim and ship one PR.
+- Keep the CLI surface stable; add flags only when a real user asks.
+- Check stars/tips at each 12h mark; re-check the kill condition on 2026-11-07.
+
