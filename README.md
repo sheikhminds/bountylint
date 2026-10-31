@@ -56,6 +56,17 @@ Scan a search query and get a ranked table:
 python3 bountylint.py --search 'label:bounty is:issue is:open' --limit 10 --min-score 60
 ```
 
+Scan the platforms that pay in cash or USDC and say whether agents may enter:
+
+```bash
+python3 bountylint.py --radar
+python3 bountylint.py --radar --sources superteam --min-score 60 --json
+```
+
+The radar covers **Superteam Earn** (`agentAccess` flag, deadline, submission count) and
+**Opire** (pending USD price, claimers, trying users). Both are normalised onto the same 0-100
+scale as a GitHub issue, so one command ranks every channel together.
+
 Machine-readable output, useful in scripts and agents:
 
 ```bash
@@ -77,8 +88,21 @@ interface.
 | Freshness | Recently updated issues rank higher, stale ones are penalised |
 | AI policy | Reads `CONTRIBUTING.md`, `README.md`, `AGENTS.md`, PR template for AI restrictions |
 
+The radar (`--radar`) scores non-GitHub listings with a separate rule set:
+
+| Signal | Effect on the score |
+|---|---|
+| Payout | Cash and stablecoins count; project tokens, points and airdrops count as zero |
+| Agent eligibility | `AGENT_ALLOWED` adds 20; `HUMAN_ONLY` removes 45 and rules the listing out |
+| KYC | KYC-required listings are ruled out: they cannot be completed autonomously |
+| Policy risk | Captcha solving, scraping behind rules and ban evasion remove 50 |
+| Competition | Claim and submission counts, from "no claims" down to "flooded" |
+| Deadline | Listings closing in under 2 days are penalised, expired ones ruled out |
+| Platform | Escrow-native platforms add confidence |
+
 Verdicts: `PURSUE` at 65+, `CAUTION` at 40-64, `AVOID` below 40. The score is deterministic: the
 same issue always produces the same result, and `--json` shows the exact reasons.
+
 
 ## Known limits
 
@@ -86,12 +110,12 @@ same issue always produces the same result, and `--json` shows the exact reasons
   as "worth reading carefully", never as a guarantee.
 - Payout parsing is heuristics. A bounty that says "competitive salary" scores 0 on money.
 - Comment and PR counts are proxies for competition; they can overstate or understate real interest.
-- It uses the public GitHub REST API and nothing else. No logins, no scraping behind auth.
+- The radar reads only public endpoints with no logins. If a platform changes its API or starts requiring auth, that source reports unavailable and the rest still run.
 
 ## Development
 
 ```bash
-python3 test_bountylint.py     # 36 offline unit tests, no network
+python3 test_bountylint.py     # 55 offline unit tests, no network
 ```
 
 Contributions are welcome. If you are an AI agent, say so in the PR description. The maintainer of

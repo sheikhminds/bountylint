@@ -19,7 +19,7 @@ import urllib.request
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-__version__ = "0.1.1"
+__version__ = "0.2.0"
 
 API = "https://api.github.com"
 USER_AGENT = f"bountylint/{__version__}"
@@ -546,6 +546,224 @@ def format_table(results: List[Dict[str, Any]]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Radar  -  bounty platforms other than GitHub, normalised to the same score
+#
+# GitHub's "bounty" label is dominated by farm repos. The platforms that still
+# pay in cash (or USDC) and state whether AI agents may enter are scanned here.
+# ---------------------------------------------------------------------------
+
+SUPERTEAM_URL = "https://earn.superteam.fun/api/listings?status=open&limit=200"
+OPIRE_URL = "https://api.opire.dev/rewards?limit=200"
+CASH_TOKENS = ("USDC", "USDG", "USDT", "USD")
+
+# Work that only pays if you break a third party's rules. Never pursue these.
+POLICY_RISK_RE = re.compile(
+    r"captcha|hcaptcha|hcapcha|recaptcha|bypass|auto[- ]?solve|solve[- ]?(?:the )?challenge|"
+    r"ban[- ]?evasion|mass (?:dm|follow|message)|account (?:farm|creator)|scrap(?:e|ing) without",
+    re.IGNORECASE,
+)
+
+
+def http_json(url: str, timeout: int = 25) -> Any:
+    """GET a JSON document from a public endpoint. Raises ValueError on bad payloads."""
+    request = urllib.request.Request(
+        url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"}
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        payload = response.read().decode("utf-8")
+    try:
+        return json.loads(payload)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{url} did not return JSON: {exc}") from exc
+
+
+def _deadline_days(stamp: Optional[str], now: datetime) -> Optional[int]:
+    if not stamp:
+        return None
+    try:
+        moment = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return (moment - now).days
+
+
+def normalise_superteam(raw: Iterable[Dict[str, Any]], now: Optional[datetime] = None) -> List[Dict[str, Any]]:
+    """Normalise Superteam Earn listings into the radar record shape."""
+    now = now or datetime.now(timezone.utc)
+    records: List[Dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        token = str(item.get("token") or "").upper()
+        reward = item.get("rewardAmount") or 0
+        amount = int(reward / 100) if reward else 0
+        access = str(item.get("agentAccess") or "UNKNOWN").upper()
+        title = str(item.get("title") or "")
+        records.append(
+            {
+                "source": "superteam",
+                "title": title,
+                "url": f"https://earn.superteam.fun/listing/{item.get('slug')}",
+                "org": str((item.get("sponsor") or {}).get("name") or ""),
+                "amount_usd": amount if token in CASH_TOKENS else 0,
+                "currency": token or "?",
+                "agent_access": {"AGENT_ALLOWED": "allowed", "HUMAN_ONLY": "human_only"}.get(
+                    access, "unknown"
+                ),
+                "kyc": None,
+                "competition": int(((item.get("_count") or {}).get("Submission") or 0)),
+                "deadline_days": _deadline_days(item.get("deadline"), now),
+                "policy_risk": bool(POLICY_RISK_RE.search(title)),
+            }
+        )
+    return records
+
+
+def normalise_opire(raw: Iterable[Dict[str, Any]], now: Optional[datetime] = None) -> List[Dict[str, Any]]:
+    """Normalise Opire rewards into the radar record shape."""
+    now = now or datetime.now(timezone.utc)
+    records: List[Dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        price = item.get("pendingPrice") or {}
+        value = price.get("value") or 0
+        unit = str(price.get("unit") or "").upper()
+        amount = int(value / 100) if unit == "USD_CENT" else int(value)
+        title = str(item.get("title") or "")
+        claimers = len(item.get("claimerUsers") or [])
+        trying = len(item.get("tryingUsers") or [])
+        project = item.get("project") or {}
+        records.append(
+            {
+                "source": "opire",
+                "title": title,
+                "url": str(item.get("url") or ""),
+                "org": str((item.get("organization") or {}).get("name") or project.get("name") or ""),
+                "amount_usd": amount,
+                "currency": "USD",
+                # Opire has no per-listing agent flag; GitHub accounts may enter.
+                "agent_access": "unknown",
+                "kyc": None,
+                "competition": claimers + trying,
+                "deadline_days": None,
+                "policy_risk": bool(POLICY_RISK_RE.search(title)),
+                "bot_installed": bool(project.get("isBotInstalled")),
+            }
+        )
+    return records
+
+
+def score_listing(signals: Dict[str, Any]) -> Dict[str, Any]:
+    """Score one non-GitHub listing on the same 0-100 scale as a GitHub issue."""
+    score = 0
+    reasons: List[List[Any]] = []
+
+    def add(delta: int, text: str) -> None:
+        nonlocal score
+        score += delta
+        reasons.append([delta, text])
+
+    amount = int(signals.get("amount_usd") or 0)
+    if amount >= 500:
+        add(25, f"pays ${amount:,}")
+    elif amount >= 200:
+        add(20, f"pays ${amount:,}")
+    elif amount >= 100:
+        add(15, f"pays ${amount:,}")
+    elif amount >= 50:
+        add(10, f"pays ${amount:,}")
+    elif amount >= 20:
+        add(6, f"pays ${amount:,}")
+    elif amount > 0:
+        add(3, f"pays only ${amount:,}")
+    else:
+        add(-10, "no cash amount in a supported currency")
+
+    access = signals.get("agent_access")
+    if access == "allowed":
+        add(20, "platform explicitly allows AI agents")
+    elif access == "human_only":
+        add(-45, "platform is human-only: an agent cannot win")
+
+    if signals.get("kyc") is True:
+        add(-40, "KYC required: cannot be completed autonomously")
+
+    if signals.get("policy_risk"):
+        add(-50, "matches a policy-risk pattern (captcha, scraping, ban evasion)")
+
+    competition = int(signals.get("competition") or 0)
+    if competition == 0:
+        add(10, "no competing claims")
+    elif competition <= 3:
+        add(6, f"light competition ({competition} claim(s))")
+    elif competition <= 10:
+        pass
+    elif competition <= 50:
+        add(-8, f"crowded ({competition} claims)")
+    else:
+        add(-14, f"flooded ({competition} claims)")
+
+    days = signals.get("deadline_days")
+    if days is None:
+        pass
+    elif days < 0:
+        add(-50, "deadline has passed")
+    elif days <= 2:
+        add(-4, f"closes in {days} day(s)")
+    elif days <= 6:
+        add(2, f"{days} day(s) left")
+    else:
+        add(6, f"{days} day(s) left")
+
+    if signals.get("source") in ("superteam", "opire"):
+        add(8, "escrow-native platform")
+
+    score = max(0, min(100, score))
+    verdict = "PURSUE" if score >= 65 else "CAUTION" if score >= 40 else "AVOID"
+    return {**signals, "score": score, "verdict": verdict, "reasons": reasons}
+
+
+def load_radar(
+    sources: Iterable[str] = ("superteam", "opire"),
+    timeout: int = 25,
+    now: Optional[datetime] = None,
+) -> List[Dict[str, Any]]:
+    """Fetch and score every supported non-GitHub source. Returns [] on total failure."""
+    records: List[Dict[str, Any]] = []
+    for source in sources:
+        url = {"superteam": SUPERTEAM_URL, "opire": OPIRE_URL}.get(source)
+        if not url:
+            continue
+        try:
+            raw = http_json(url, timeout=timeout)
+        except (urllib.error.URLError, ValueError, OSError) as exc:
+            print(f"warn: {source} unavailable ({exc})", file=sys.stderr)
+            continue
+        items = raw if isinstance(raw, list) else raw.get("data") or []
+        if source == "superteam":
+            records.extend(normalise_superteam(items, now=now))
+        else:
+            records.extend(normalise_opire(items, now=now))
+    return [score_listing(record) for record in records]
+
+
+def format_radar_table(results: List[Dict[str, Any]]) -> str:
+    header = f"{'SCORE':>5}  {'VERDICT':8}  {'USD':>7}  {'CLAIMS':>6}  {'DAYS':>4}  {'AGENT':9}  SOURCE/TITLE"
+    rows = [header, "-" * len(header)]
+    for result in results:
+        days = result.get("deadline_days")
+        days_text = "?" if days is None else str(days)
+        agent = (result.get("agent_access") or "unknown").replace("_", " ")
+        rows.append(
+            f"{result['score']:>5}  {result['verdict']:8}  "
+            f"{result['amount_usd']:>7,}  {result['competition']:>6}  {days_text:>4}  "
+            f"{agent[:9]:9}  {result['source']}: {(result['title'] or '')[:44]}"
+        )
+    return "\n".join(rows)
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -557,6 +775,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     parser.add_argument("target", nargs="?", help="issue URL or owner/repo#123")
     parser.add_argument("--search", metavar="QUERY", help="GitHub issue-search query to scan")
+    parser.add_argument(
+        "--radar",
+        action="store_true",
+        help="scan non-GitHub platforms (Superteam Earn, Opire) instead of GitHub",
+    )
+    parser.add_argument(
+        "--sources",
+        default="superteam,opire",
+        help="comma-separated platforms for --radar (default: superteam,opire)",
+    )
     parser.add_argument("--limit", type=int, default=10, help="max issues to analyse in search mode")
     parser.add_argument("--min-score", type=int, default=0, help="hide results below this score")
     parser.add_argument("--json", action="store_true", help="machine-readable output")
@@ -565,8 +793,22 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--version", action="version", version=f"bountylint {__version__}")
     args = parser.parse_args(argv)
 
-    if not args.target and not args.search:
-        parser.error("give an issue URL/owner-repo#number, or --search QUERY")
+    if not args.target and not args.search and not args.radar:
+        parser.error("give an issue URL/owner-repo#number, --search QUERY, or --radar")
+
+    if args.radar:
+        sources = [s.strip() for s in args.sources.split(",") if s.strip()]
+        results = load_radar(sources, timeout=args.timeout)
+        results = [r for r in results if r["score"] >= args.min_score]
+        results.sort(key=lambda r: (-r["score"], -r["amount_usd"]))
+        if args.json:
+            print(json.dumps(results, indent=2))
+        elif results:
+            print(format_radar_table(results))
+            print(f"\n{len(results)} listing(s) analysed across {', '.join(sources)}.")
+        else:
+            print("Nothing found, or every source was unreachable.")
+        return 0
 
     client = GitHub(token=args.token, timeout=args.timeout)
     try:
