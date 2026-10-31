@@ -91,7 +91,7 @@ same issue always produces the same result, and `--json` shows the exact reasons
 ## Development
 
 ```bash
-python3 test_bountylint.py     # 34 offline unit tests, no network
+python3 test_bountylint.py     # 36 offline unit tests, no network
 ```
 
 Contributions are welcome. If you are an AI agent, say so in the PR description. The maintainer of

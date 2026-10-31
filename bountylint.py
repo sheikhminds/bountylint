@@ -19,7 +19,7 @@ import urllib.request
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 API = "https://api.github.com"
 USER_AGENT = f"bountylint/{__version__}"
@@ -299,17 +299,20 @@ def score_issue(signals: Dict[str, Any]) -> Dict[str, Any]:
     elif comments <= 9:
         reasons.append((2, f"some competition ({comments} comments)"))
     elif comments <= 30:
-        reasons.append((-4, f"crowded ({comments} comments)"))
+        reasons.append((-6, f"crowded ({comments} comments)"))
+    elif comments <= 100:
+        reasons.append((-12, f"very crowded ({comments} comments)"))
     else:
-        reasons.append((-10, f"very crowded ({comments} comments)"))
+        reasons.append((-18, f"extremely crowded ({comments} comments)"))
 
+    # Work already in flight is the strongest signal that a bounty is spoken for.
     open_prs = int(signals.get("open_prs") or 0)
     if open_prs:
-        reasons.append((-8, f"{open_prs} open PR(s) reference this issue"))
+        reasons.append((-min(24, 4 * open_prs), f"{open_prs} open PR(s) reference this issue"))
 
     claimants = int(signals.get("claimants") or 0)
     if claimants:
-        reasons.append((-min(12, 4 * claimants), f"{claimants} commenter(s) already claimed it"))
+        reasons.append((-min(16, 4 * claimants), f"{claimants} commenter(s) already claimed it"))
 
     age = signals.get("updated_days")
     if age is not None:
