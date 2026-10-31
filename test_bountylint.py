@@ -294,5 +294,133 @@ class AnalyseTests(unittest.TestCase):
         self.assertIn("Improve CSV export", table)
 
 
+NOW = datetime(2026, 10, 31, 12, 0, tzinfo=timezone.utc)
+
+
+class SuperteamNormaliseTests(unittest.TestCase):
+    def raw(self, **overrides):
+        base = {
+            "title": "Ship a Solana indexer",
+            "slug": "ship-a-solana-indexer",
+            "rewardAmount": 150000,
+            "token": "USDC",
+            "deadline": "2026-11-10T12:00:00.000Z",
+            "agentAccess": "AGENT_ALLOWED",
+            "sponsor": {"name": "Acme Labs"},
+            "_count": {"Submission": 2},
+        }
+        base.update(overrides)
+        return [base]
+
+    def test_cents_are_converted_to_dollars(self):
+        record = bountylint.normalise_superteam(self.raw(), now=NOW)[0]
+        self.assertEqual(record["amount_usd"], 1500)
+
+    def test_agent_access_is_normalised(self):
+        record = bountylint.normalise_superteam(self.raw(), now=NOW)[0]
+        self.assertEqual(record["agent_access"], "allowed")
+        blocked = bountylint.normalise_superteam(self.raw(agentAccess="HUMAN_ONLY"), now=NOW)[0]
+        self.assertEqual(blocked["agent_access"], "human_only")
+
+    def test_non_cash_token_scores_zero_money(self):
+        record = bountylint.normalise_superteam(self.raw(token="POINTS"), now=NOW)[0]
+        self.assertEqual(record["amount_usd"], 0)
+
+    def test_deadline_days_are_computed(self):
+        record = bountylint.normalise_superteam(self.raw(), now=NOW)[0]
+        self.assertEqual(record["deadline_days"], 10)
+
+    def test_bad_deadline_is_unknown_not_a_crash(self):
+        record = bountylint.normalise_superteam(self.raw(deadline="not-a-date"), now=NOW)[0]
+        self.assertIsNone(record["deadline_days"])
+
+    def test_url_is_built_from_slug(self):
+        record = bountylint.normalise_superteam(self.raw(), now=NOW)[0]
+        self.assertIn("ship-a-solana-indexer", record["url"])
+
+
+class OpireNormaliseTests(unittest.TestCase):
+    def test_cent_prices_are_converted(self):
+        raw = [{"title": "Add export", "url": "https://github.com/a/b/issues/1",
+                "pendingPrice": {"value": 4200, "unit": "USD_CENT"},
+                "claimerUsers": [], "tryingUsers": [{"id": 1}],
+                "organization": {"name": "acme"}, "project": {"isBotInstalled": False}}]
+        record = bountylint.normalise_opire(raw, now=NOW)[0]
+        self.assertEqual(record["amount_usd"], 42)
+        self.assertEqual(record["competition"], 1)
+
+    def test_dollar_prices_are_left_alone(self):
+        raw = [{"title": "Add export", "pendingPrice": {"value": 300, "unit": "USD"}}]
+        self.assertEqual(bountylint.normalise_opire(raw, now=NOW)[0]["amount_usd"], 300)
+
+
+class ListingScoreTests(unittest.TestCase):
+    def base(self, **overrides):
+        record = {
+            "source": "superteam", "title": "Write docs", "url": "https://x",
+            "org": "acme", "amount_usd": 500, "currency": "USDC",
+            "agent_access": "allowed", "kyc": None, "competition": 0,
+            "deadline_days": 10, "policy_risk": False,
+        }
+        record.update(overrides)
+        return record
+
+    def test_clean_agent_job_is_pursued(self):
+        result = bountylint.score_listing(self.base())
+        self.assertEqual(result["verdict"], "PURSUE")
+        self.assertGreaterEqual(result["score"], 65)
+
+    def test_human_only_is_never_pursued(self):
+        result = bountylint.score_listing(self.base(agent_access="human_only"))
+        self.assertEqual(result["verdict"], "AVOID")
+
+    def test_kyc_is_disqualifying(self):
+        self.assertEqual(bountylint.score_listing(self.base(kyc=True))["verdict"], "AVOID")
+
+    def test_policy_risk_is_disqualifying(self):
+        result = bountylint.score_listing(self.base(policy_risk=True))
+        self.assertEqual(result["verdict"], "AVOID")
+
+    def test_expired_deadline_is_penalised(self):
+        self.assertLess(
+            bountylint.score_listing(self.base(deadline_days=-1))["score"],
+            bountylint.score_listing(self.base(deadline_days=10))["score"],
+        )
+
+    def test_flooded_competition_drops_score(self):
+        self.assertLess(
+            bountylint.score_listing(self.base(competition=400))["score"],
+            bountylint.score_listing(self.base(competition=0))["score"],
+        )
+
+    def test_score_is_clamped(self):
+        worst = bountylint.score_listing(
+            self.base(amount_usd=0, agent_access="human_only", kyc=True,
+                      policy_risk=True, competition=999, deadline_days=-3)
+        )
+        self.assertGreaterEqual(worst["score"], 0)
+        self.assertLessEqual(bountylint.score_listing(self.base())["score"], 100)
+
+    def test_reasons_are_recorded(self):
+        result = bountylint.score_listing(self.base())
+        self.assertTrue(result["reasons"])
+        self.assertTrue(all(isinstance(r[0], int) for r in result["reasons"]))
+
+    def test_policy_risk_pattern_matches_captcha_work(self):
+        self.assertTrue(bountylint.POLICY_RISK_RE.search("Auto Solve hcapcha"))
+        self.assertTrue(bountylint.POLICY_RISK_RE.search("bypass the login wall"))
+
+    def test_policy_risk_pattern_ignores_normal_work(self):
+        self.assertIsNone(bountylint.POLICY_RISK_RE.search("Fix CSV export in the dashboard"))
+
+    def test_radar_table_lists_both_platforms(self):
+        rows = [bountylint.score_listing(self.base()),
+                bountylint.score_listing(self.base(source="opire", title="Fix parser"))]
+        table = bountylint.format_radar_table(rows)
+        self.assertIn("superteam", table)
+        self.assertIn("opire", table)
+        self.assertIn("SCORE", table)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
